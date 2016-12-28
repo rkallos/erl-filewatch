@@ -1,0 +1,5 @@
+{application, filewatch,
+ [{description, "Watch for file changes"},
+  {vsn, git}
+ ]
+}.
