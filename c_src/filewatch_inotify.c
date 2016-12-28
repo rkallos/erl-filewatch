@@ -22,6 +22,10 @@ struct instance {
     ErlDrvTermData buf[(MAX_COOLDOWNS * MSG_LENGTH) + 3];
 };
 
+static void serialize_output(struct instance *self);
+static void serialize_event(struct instance *self, const struct inotify_event *evt);
+static void reset_instance(struct instance *self);
+
 static ErlDrvData start(ErlDrvPort port, char *UNUSED)
 {
     struct instance *self = driver_alloc(sizeof(*self));
@@ -150,16 +154,7 @@ static void ready_input(ErlDrvData self_, ErlDrvEvent fd_)
         const char *ptr;
         for (ptr = buf; ptr < buf + len; ptr += sizeof(struct inotify_event) + event->len) {
             event = (const struct inotify_event *)ptr;
-            size_t name_len = strlen(event->name);
-
-            self->buf[self->pos++] = ERL_DRV_INT;
-            self->buf[self->pos++] = event->wd;
-            self->buf[self->pos++] = ERL_DRV_STRING;
-            self->buf[self->pos++] = (ErlDrvTermData) event->name;
-            self->buf[self->pos++] = name_len;
-            self->buf[self->pos++] = ERL_DRV_TUPLE;
-            self->buf[self->pos++] = 2;
-            self->len++;
+            serialize_event(self, event);
         }
 
         if (++self->n_cooldowns < MAX_COOLDOWNS)
@@ -182,20 +177,39 @@ static void timeout(ErlDrvData self_)
 {
     struct instance *self = (struct instance *)self_;
 
-    self->n_cooldowns = 0;
+    serialize_output(self);
+    int len = self->pos;
+
+    /* Reset to write over previous data */
+    reset_instance(self);
+
+    erl_drv_output_term(driver_mk_port(self->port),
+                        self->buf, len);
+}
+
+static void serialize_output(struct instance *self) {
     self->buf[self->pos++] = ERL_DRV_NIL;
     self->buf[self->pos++] = ERL_DRV_LIST;
     self->buf[self->pos++] = self->len + 1;
     self->buf[self->pos++] = ERL_DRV_TUPLE;
     self->buf[self->pos++] = 2;
-    int len = self->pos;
+}
 
-    /* Reset to write over previous data */
+static void serialize_event(struct instance *self, const struct inotify_event *evt) {
+    self->buf[self->pos++] = ERL_DRV_INT;
+    self->buf[self->pos++] = evt->wd;
+    self->buf[self->pos++] = ERL_DRV_STRING;
+    self->buf[self->pos++] = (ErlDrvTermData) evt->name;
+    self->buf[self->pos++] = strlen(evt->name);
+    self->buf[self->pos++] = ERL_DRV_TUPLE;
+    self->buf[self->pos++] = 2;
+    self->len++;
+}
+
+static void reset_instance(struct instance *self) {
+    self->n_cooldowns = 0;
     self->pos = 2;
     self->len = 0;
-
-    erl_drv_output_term(driver_mk_port(self->port),
-                        self->buf, len);
 }
 
 static ErlDrvEntry driver_entry = {
