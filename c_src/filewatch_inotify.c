@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <sys/inotify.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include <ei.h>
 #include <erl_driver.h>
@@ -12,6 +13,17 @@
 
 enum { MAX_COOLDOWNS = 12, MSG_LENGTH = 11 };
 
+/*
+  A struct inotify_event's relevant data is copied to an array of
+  struct message. This fixes a bug where messages sent back to Erlang
+  had incorrect filenames.
+*/
+struct message {
+    int wd;
+    uint32_t len;
+    char name[NAME_MAX];
+};
+
 struct instance {
     ErlDrvPort port;
     int fd;
@@ -19,11 +31,13 @@ struct instance {
     unsigned n_cooldowns;
     unsigned long cooldown;
     size_t pos;
+    struct message msgs[MAX_COOLDOWNS];
     ErlDrvTermData buf[(MAX_COOLDOWNS * MSG_LENGTH) + 3];
 };
 
 static void serialize_output(struct instance *self);
 static void serialize_event(struct instance *self, const struct inotify_event *evt);
+static void serialize_message(struct instance *self, struct message *msg);
 static void reset_instance(struct instance *self);
 
 static ErlDrvData start(ErlDrvPort port, char *UNUSED)
@@ -177,6 +191,10 @@ static void timeout(ErlDrvData self_)
 {
     struct instance *self = (struct instance *)self_;
 
+    for(int i = 0; i < self->len; ++i) {
+        serialize_message(self, &(self->msgs[i]));
+    }
+
     serialize_output(self);
     int len = self->pos;
 
@@ -196,14 +214,20 @@ static void serialize_output(struct instance *self) {
 }
 
 static void serialize_event(struct instance *self, const struct inotify_event *evt) {
+    struct message *msg = &(self->msgs[self->len++]);
+    msg->wd = evt->wd;
+    msg->len = evt->len;
+    strncpy(msg->name, evt->name, (size_t)(evt->len));
+}
+
+static void serialize_message(struct instance *self, struct message *msg) {
     self->buf[self->pos++] = ERL_DRV_INT;
-    self->buf[self->pos++] = evt->wd;
+    self->buf[self->pos++] = msg->wd;
     self->buf[self->pos++] = ERL_DRV_STRING;
-    self->buf[self->pos++] = (ErlDrvTermData) evt->name;
-    self->buf[self->pos++] = strlen(evt->name);
+    self->buf[self->pos++] = (ErlDrvTermData) msg->name;
+    self->buf[self->pos++] = strlen(msg->name);
     self->buf[self->pos++] = ERL_DRV_TUPLE;
     self->buf[self->pos++] = 2;
-    self->len++;
 }
 
 static void reset_instance(struct instance *self) {
