@@ -11,4 +11,7 @@ dialyzer:
 clean:
 	@$(REBAR) clean -a
 
-.PHONY: all deps compile clean
+check: compile dialyzer
+	@bats t/stress.t
+
+.PHONY: all deps compile clean check
