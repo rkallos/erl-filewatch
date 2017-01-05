@@ -39,6 +39,7 @@ static void serialize_output(struct instance *self);
 static void serialize_event(struct instance *self, const struct inotify_event *evt);
 static void serialize_message(struct instance *self, struct message *msg);
 static void reset_instance(struct instance *self);
+static void send_output(ErlDrvData self_);
 
 static ErlDrvData start(ErlDrvPort port, char *UNUSED)
 {
@@ -167,12 +168,18 @@ static void ready_input(ErlDrvData self_, ErlDrvEvent fd_)
 
         const char *ptr;
         for (ptr = buf; ptr < buf + len; ptr += sizeof(struct inotify_event) + event->len) {
+            if (self->len >= MAX_COOLDOWNS) {
+                send_output(self_);
+            }
             event = (const struct inotify_event *)ptr;
             serialize_event(self, event);
         }
 
-        if (++self->n_cooldowns < MAX_COOLDOWNS)
+        if (++self->n_cooldowns < MAX_COOLDOWNS) {
             driver_set_timer(self->port, self->cooldown);
+        } else {
+            send_output(self_);
+        }
 
         // The kernel always checks if there is enough room in the buffer for
         // an entire event, so there should be nothing left over.
@@ -187,7 +194,7 @@ static void ready_input(ErlDrvData self_, ErlDrvEvent fd_)
     assert(len >= 0 || errno == EAGAIN);
 }
 
-static void timeout(ErlDrvData self_)
+static void send_output(ErlDrvData self_)
 {
     struct instance *self = (struct instance *)self_;
 
@@ -243,7 +250,7 @@ static ErlDrvEntry driver_entry = {
     .minor_version = ERL_DRV_EXTENDED_MINOR_VERSION,
     .start = start,
     .stop_select = stop_select,
-    .timeout = timeout,
+    .timeout = send_output,
     .stop = stop,
     .call = call,
     .ready_input = ready_input
