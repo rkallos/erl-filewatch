@@ -223,8 +223,8 @@ static void serialize_output(struct instance *self) {
 static void serialize_event(struct instance *self, const struct inotify_event *evt) {
     struct message *msg = &(self->msgs[self->len++]);
     msg->wd = evt->wd;
-    msg->len = evt->len;
-    strncpy(msg->name, evt->name, (size_t)(evt->len));
+    msg->len = strnlen(evt->name, NAME_MAX);
+    strncpy(msg->name, evt->name, (size_t)(msg->len));
 }
 
 static void serialize_message(struct instance *self, struct message *msg) {
