@@ -76,7 +76,7 @@ add_watch(Dir, Port) ->
 watch(S=#state{port = Port}) ->
     receive
         {Port, Msgs} ->
-            handle_events(S, Msgs),
+            handle_events(S, ordsets:from_list(Msgs)),
             watch(S);
         terminate ->
             ok;
