@@ -1,7 +1,7 @@
 filewatch-nif
 =====
 
-An OTP library
+An OTP application
 
 Build
 -----

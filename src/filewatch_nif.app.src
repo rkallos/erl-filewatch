@@ -1,15 +1,8 @@
-{application, filewatch-nif,
- [{description, "An OTP library"},
-  {vsn, "0.1.0"},
-  {registered, []},
-  {applications,
-   [kernel,
+{application, filewatch_nif, [
+  {description, "filewatch-nif"},
+  {vsn, "git"},
+  {applications, [
+    kernel,
     stdlib
-   ]},
-  {env,[]},
-  {modules, []},
-
-  {maintainers, []},
-  {licenses, []},
-  {links, []}
- ]}.
+  ]}
+]}.
