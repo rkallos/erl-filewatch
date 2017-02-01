@@ -108,7 +108,7 @@ static ErlDrvSSizeT call(
 
     int error = 0;
     char *error_str = NULL;
-    int wd = inotify_add_watch(self->fd, path, IN_MODIFY | IN_MOVED_TO | IN_CREATE | IN_CLOSE_WRITE);
+    int wd = inotify_add_watch(self->fd, path, IN_MOVED_TO | IN_CLOSE_WRITE);
     if (wd < 0) {
         error = errno;
         error_str = strerror(error);
