@@ -1,5 +1,16 @@
 {application, filewatch,
  [{description, "Watch for file changes"},
-  {vsn, git}
- ]
-}.
+  {vsn, "0.1"},
+  {registered, []},
+  {mod, {filewatch, []}},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {maintainers, []},
+  {licenses, []},
+  {links, []}
+ ]}.
