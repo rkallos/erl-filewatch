@@ -11,7 +11,7 @@
 
 #include "macrology.h"
 
-enum { MAX_COOLDOWNS = 12, MSG_LENGTH = 11 };
+enum { MAX_COOLDOWNS = 12, MSG_LENGTH = 11, CALL_ARG = 1 };
 
 /*
   A struct inotify_event's relevant data is copied to an array of
@@ -88,11 +88,13 @@ static void stop(ErlDrvData self_)
 
 static ErlDrvSSizeT call(
     ErlDrvData self_,
-    unsigned int UNUSED,
+    unsigned int operation,
     char *buf, ErlDrvSizeT UNUSED,
     char **rbuf, ErlDrvSizeT rlen,
     unsigned int *UNUSED)
 {
+    if (operation == CALL_ARG) goto fail_op_arg;
+
     struct instance *self = (struct instance *)self_;
 
     int index = 0;
@@ -149,6 +151,7 @@ static ErlDrvSSizeT call(
 
   fail_alloc:
   fail_decode:
+  fail_op_arg:
     return -1;
 }
 

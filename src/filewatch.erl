@@ -1,44 +1,39 @@
 -module(filewatch).
--export([start/2, stop/1]).
+-export([start/1,
+         start/2,
+         stop/1]).
+
+-type watch_pair() :: {file:name_all(), term()}.
+-export_type([watch_pair/0]).
+
+-define(DRIVER_NAME, filewatch).
+-define(COOLDOWN_MS, application:get_env(filewatch, cooldown_ms, 3000)).
+-define(CALL_ARG, 1).
 
 -type handle() :: pid().
+-type watch_descriptor() :: integer().
+-type directory() :: file:filename().
 
 -record(state,
         {pid :: pid(),
          port :: port(),
-         map :: #{ {integer(), file:filename()} => any(),
-                   file:filename() => integer()}
+         watch_map :: #{
+           {watch_descriptor(), file:filename()} => any(),
+            directory()                          => watch_descriptor()
+         }
         }).
 
+%% public
 
-priv_dir() ->
-    case code:priv_dir(?MODULE) of
-        {error, _} ->
-            filename:join(filename:dirname(filename:dirname(code:which(?MODULE))),
-                          "priv");
-        Dir -> Dir
-    end.
+-spec start([filewatch:watch_pair()]) -> {ok, handle()} | {error, _}.
 
+start(Pairs) ->
+    start(self(), Pairs).
 
-%% If you put this in on_load, it will immediately get unloaded when that child dies.
-load() ->
-    case erl_ddll:load_driver(priv_dir(), "filewatch") of
-        ok -> ok;
-        {error, already_loaded} -> ok;
-        {error, Message} ->
-            error_logger:error_msg("filewatch: error loading driver: ~p",
-                                   [erl_ddll:format_error(Message)])
-    end.
+-spec start(pid(), [filewatch:watch_pair()]) -> {ok, handle()} | {error, _}.
 
-
--spec start(pid(), [{file:name_all(), term()}]) -> {ok, handle()} | {error, _}.
-
-start(Self, Pairs) ->
-    %% CooldownMs = case application:get_env(cooldown) of
-    %%                  {ok, Cd} -> Cd;
-    %%                  undefined -> 3000
-    %%              end,
-    Pid = spawn_link(fun () -> init(Self, Pairs) end),
+start(Dest, Pairs) ->
+    Pid = spawn_link(fun () -> init(Dest, Pairs) end),
     {ok, Pid}.
 
 -spec stop(handle()) -> ok | {error, _}.
@@ -47,61 +42,93 @@ stop(Handle) ->
     Handle ! terminate,
     ok.
 
+%% private
+
+priv_dir() ->
+    case code:priv_dir(?MODULE) of
+        {error, _} ->
+            EbinDir = filename:dirname(code:which(?MODULE)),
+            AppPath = filename:dirname(EbinDir),
+            filename:join(AppPath, "priv");
+        Dir -> Dir
+    end.
+
+
+load() ->
+    case erl_ddll:load_driver(priv_dir(), ?DRIVER_NAME) of
+        ok -> ok;
+        {error, already_loaded} -> ok;
+        {error, Message} ->
+            error_logger:error_msg("~p: error loading driver: ~p",
+                                   [?DRIVER_NAME,
+                                    erl_ddll:format_error(Message)])
+    end.
+
+
 init(Pid, Pairs) ->
     ok = load(),
-    Port = open_port({spawn_driver, "filewatch "}, [in]),
+    Arg = io_lib:format("~p ~p", [?DRIVER_NAME, ?COOLDOWN_MS]),
+    Port = open_port({spawn_driver, Arg}, [in]),
     WatchMap = create_watch_map(Pairs, Port, maps:new()),
-    watch(#state{pid=Pid, port=Port, map=WatchMap}).
+    [cast(Pid, Term) || {_, Term} <- Pairs],
+    watch(#state{pid = Pid, port = Port, watch_map = WatchMap}).
 
 
 create_watch_map([], _Port, Map) -> Map;
 create_watch_map([{Path, Term} | Rest], Port, Map) ->
     Dir = filename:dirname(Path),
-    File = filename:basename(Path),
-    Wd = case maps:get(Dir, Map, undefined) of
-             undefined ->
-                 {ok, Descriptor} = add_watch(Dir, Port),
-                 Descriptor;
-             D -> D
-         end,
-    Result = maps:put({Wd, File}, Term, Map),
-    create_watch_map(Rest, Port, Result).
+    NewMap = case filelib:is_dir(Dir) of
+                 true ->
+                     File = filename:basename(Path),
+                     add_to_watch_map(Dir, File, Term, Port, Map);
+                 false ->
+                     error_logger:error_msg("~p: Path ~p is not a directory",
+                                            [?DRIVER_NAME, Dir]),
+                     Map
+             end,
+    create_watch_map(Rest, Port, NewMap).
+
+
+add_to_watch_map(Dir, File, Term, Port, Map) ->
+    {ok, WatchDescriptor} =
+        case maps:find(Dir, Map) of
+            error -> add_watch(Dir, Port);
+            Match -> Match
+        end,
+    maps:put({WatchDescriptor, File}, Term, Map).
 
 
 add_watch(Dir, Port) ->
-    erlang:port_call(Port, 1337, Dir).
+    erlang:port_call(Port, ?CALL_ARG, Dir).
 
 
 -spec watch(#state{}) -> ok.
-watch(S=#state{port = Port}) ->
+watch(S = #state{port = Port}) ->
     receive
         {Port, Msgs} ->
             handle_events(S, ordsets:from_list(Msgs)),
             watch(S);
         terminate ->
             ok;
-        _ ->
-            exit(unexpected_message)
+        Msg ->
+            error_logger:error_msg("~p: Unexpected message received by watcher process: ~p",
+                                   [?DRIVER_NAME, Msg]),
+            ok
     end.
 
 
 handle_events(_S, []) -> ok;
-handle_events(S=#state{}, [Msg | Msgs]) ->
+handle_events(S = #state{}, [Msg | Msgs]) ->
     handle_event(S, Msg),
     handle_events(S, Msgs).
 
 
-handle_event(#state{pid = Pid, map = Map}, {Wd, "*"}) ->
-    case maps:get({Wd, "*"}, Map, undefined) of
-        undefined -> ok;
-        Term -> msg(Pid, Term)
-    end;
-handle_event(State = #state{pid = Pid, map = Map}, {Wd, Name}) ->
+handle_event(#state{pid = Pid, watch_map = Map}, {Wd, Name}) ->
     case maps:get({Wd, Name}, Map, undefined) of
-        undefined -> handle_event(State, {Wd, "*"});
-        Term -> msg(Pid, Term)
+        undefined -> ok;
+        Term -> cast(Pid, Term)
     end.
 
 
-msg(Pid, Term) ->
-    Pid ! {filewatch, self(), Term}.
+cast(Pid, Term) ->
+    Pid ! {?DRIVER_NAME, self(), Term}.
