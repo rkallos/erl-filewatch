@@ -7,20 +7,23 @@
 -define(
    fixture(Files, Fun, NEvents, Expect),
        Dir = create_sandbox(?FUNCTION_NAME),
+       [touch(filename:join(Dir, File)) || File <- Files],
        Pairs = [{filename:join(Dir, File), File} || File <- Files],
        {ok, P} = filewatch:start(self(), Pairs),
+       State1 = collect_events(Files),
        [start_sender(Path, Fun, NEvents) || {Path, _} <- Pairs],
-       State = collect_events(Files),
+       State2 = collect_events(Files),
        filewatch:stop(P),
        rm_rf(Dir),
-       ?assert(State =:= Expect)
+       ?assert(State1 =:= Expect),
+       ?assert(State2 =:= Expect)
   ).
 
 one_file_one_touch_test() ->
-    ?fixture(?ONE_FILE, fun touch/1, 1, false).
+    ?fixture(?ONE_FILE, fun touch/1, 1, true).
 
 one_file_one_rm_test() ->
-    ?fixture(?ONE_FILE, fun rm/1, 1, false).
+    ?fixture(?ONE_FILE, fun rm/1, 1, true).
 
 one_file_one_touch_rm_test() ->
     ?fixture(?ONE_FILE, fun touch_rm/1, 1, true).
@@ -39,6 +42,18 @@ one_file_many_touch_rm_test() ->
 
 one_file_many_replace_test() ->
     ?fixture(?ONE_FILE, fun replace/1, 1000, true).
+
+one_nonexistent_file_touch_test() ->
+    Dir = create_sandbox(?FUNCTION_NAME),
+    File = "testfile",
+    Path = filename:join(Dir, "testfile"),
+    Pair = {Path, File},
+    {ok, P} = filewatch:start(self(), [Pair]),
+    start_sender(Path, fun touch/1, 1),
+    State1 = collect_events([File]),
+    filewatch:stop(P),
+    rm_rf(Dir),
+    ?assert(State1 =:= true).
 
 many_files_few_touch_rm_test() ->
     ?fixture(many_file_names(1 bsl 3), fun touch_rm/1, 5, true).
