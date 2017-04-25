@@ -1,4 +1,8 @@
+#include "macrology.h"
+
+#include <alloca.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
@@ -9,9 +13,14 @@
 #include <ei.h>
 #include <erl_driver.h>
 
-#include "macrology.h"
-
-enum { MAX_COOLDOWNS = 12, MSG_LENGTH = 11, CALL_ARG = 1 };
+enum {
+    MAX_EVENTS = 12,
+    EVENT_TUPLE_LENGTH = 11,
+    PORT_CALL_ARG = 1,
+    WATCH_FLAGS = IN_MOVED_TO | IN_CLOSE_WRITE,
+    BUFFER_TAIL_SIZE = 3,
+    BUFFER_TUPLE_SIZE = 2
+};
 
 /*
   A struct inotify_event's relevant data is copied to an array of
@@ -20,38 +29,47 @@ enum { MAX_COOLDOWNS = 12, MSG_LENGTH = 11, CALL_ARG = 1 };
 */
 struct message {
     int wd;
-    uint32_t len;
+    size_t len;
     char name[NAME_MAX];
 };
 
 struct instance {
     ErlDrvPort port;
     int fd;
-    int len;
-    unsigned n_cooldowns;
-    unsigned long cooldown;
-    size_t pos;
-    struct message msgs[MAX_COOLDOWNS];
-    ErlDrvTermData buf[(MAX_COOLDOWNS * MSG_LENGTH) + 3];
+    size_t n_events;
+    unsigned long cooldown_ms;
+    struct message msgs[MAX_EVENTS];
 };
 
-static void serialize_output(struct instance *self);
-static void serialize_event(struct instance *self, const struct inotify_event *evt);
-static void serialize_message(struct instance *self, struct message *msg);
-static void reset_instance(struct instance *self);
-static void send_output(ErlDrvData self_);
-
-static ErlDrvData start(ErlDrvPort port, char *UNUSED)
+// argv = ["filewatch", CooldownMs]
+static bool get_arguments(char *command, unsigned long *cooldown_ms)
 {
+    if (!command || !cooldown_ms) return false;
+
+    command = strchr(command, ' ');
+    if (!command) return false;
+
+    command += strspn(command, " ");
+    if (!*command) return false;
+
+    char *start = command, *end;
+    *cooldown_ms = strtoul(start, &end, 10);
+    if (start == end)
+        return false;
+    return true;
+}
+
+static ErlDrvData start(ErlDrvPort port, char *command)
+{
+    unsigned long cooldown_ms;
+    if (!get_arguments(command, &cooldown_ms))
+        return ERL_DRV_ERROR_BADARG;
+
     struct instance *self = driver_alloc(sizeof(*self));
     if (!self) return ERL_DRV_ERROR_GENERAL;
     *self = (struct instance){0};
     self->port = port;
-    self->cooldown = 3000;
-
-    self->pos = 0;
-    self->buf[self->pos++] = ERL_DRV_PORT;
-    self->buf[self->pos++] = driver_mk_port(port);
+    self->cooldown_ms = cooldown_ms;
 
     self->fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (self->fd < 0) {
@@ -93,24 +111,25 @@ static ErlDrvSSizeT call(
     char **rbuf, ErlDrvSizeT rlen,
     unsigned int *UNUSED)
 {
-    if (operation == CALL_ARG) goto fail_op_arg;
+    if (operation != PORT_CALL_ARG) goto fail_op_check;
 
     struct instance *self = (struct instance *)self_;
 
     int index = 0;
-    if (ei_decode_version(buf, &index, NULL) < 0) return -1;
+    if (ei_decode_version(buf, &index, NULL) < 0) goto fail_decode;
 
     int type;
     int path_len;
-    if (ei_get_type(buf, &index, &type, &path_len) < 0) return -1;
+    if (ei_get_type(buf, &index, &type, &path_len) < 0) goto fail_decode;
 
     assert(path_len >= 0);
-    char path[path_len+1];
+
+    char *path = alloca(path_len+1);
     if (ei_decode_string(buf, &index, path) < 0) goto fail_decode;
 
     int error = 0;
     char *error_str = NULL;
-    int wd = inotify_add_watch(self->fd, path, IN_MOVED_TO | IN_CLOSE_WRITE);
+    int wd = inotify_add_watch(self->fd, path, WATCH_FLAGS);
     if (wd < 0) {
         error = errno;
         error_str = strerror(error);
@@ -151,8 +170,52 @@ static ErlDrvSSizeT call(
 
   fail_alloc:
   fail_decode:
-  fail_op_arg:
+  fail_op_check:
     return -1;
+}
+
+/* Return type to Erlang:
+   {port(), [{watch_descriptor(), filename:basename()}]}
+*/
+static void send_output(ErlDrvData self_)
+{
+    struct instance *self = (struct instance *)self_;
+
+    size_t pos = 0;
+    ErlDrvTermData buf[(MAX_EVENTS * EVENT_TUPLE_LENGTH) + BUFFER_TAIL_SIZE];
+
+    buf[pos++] = ERL_DRV_PORT;
+    buf[pos++] = driver_mk_port(self->port);
+
+    struct message *msg;
+    for(uint i = 0; i < self->n_events; ++i) {
+        msg = &(self->msgs[i]);
+        buf[pos++] = ERL_DRV_INT;
+        buf[pos++] = msg->wd;
+        buf[pos++] = ERL_DRV_STRING;
+        buf[pos++] = (ErlDrvTermData) msg->name;
+        buf[pos++] = strnlen(msg->name, NAME_MAX);
+        buf[pos++] = ERL_DRV_TUPLE;
+        buf[pos++] = BUFFER_TUPLE_SIZE;
+    }
+
+    /* Append values designating Erlang type */
+    buf[pos++] = ERL_DRV_NIL;
+    buf[pos++] = ERL_DRV_LIST;
+    buf[pos++] = self->n_events + 1; // +1 for nil
+    buf[pos++] = ERL_DRV_TUPLE;
+    buf[pos++] = BUFFER_TUPLE_SIZE;
+
+    self->n_events = 0;
+
+    erl_drv_output_term(driver_mk_port(self->port), buf, pos);
+}
+
+static void serialize_event(struct instance *self, const struct inotify_event *evt) {
+    struct message *msg = &(self->msgs[self->n_events++]);
+    msg->wd = evt->wd;
+    msg->len = strnlen(evt->name, NAME_MAX);
+    strncpy(msg->name, evt->name, NAME_MAX);
 }
 
 #define aligned(x) __attribute((aligned(x)))
@@ -171,15 +234,15 @@ static void ready_input(ErlDrvData self_, ErlDrvEvent fd_)
 
         const char *ptr;
         for (ptr = buf; ptr < buf + len; ptr += sizeof(struct inotify_event) + event->len) {
-            if (self->len >= MAX_COOLDOWNS) {
+            if (self->n_events >= MAX_EVENTS) {
                 send_output(self_);
             }
             event = (const struct inotify_event *)ptr;
             serialize_event(self, event);
         }
 
-        if (++self->n_cooldowns < MAX_COOLDOWNS) {
-            driver_set_timer(self->port, self->cooldown);
+        if (++self->n_events < MAX_EVENTS) {
+            driver_set_timer(self->port, self->cooldown_ms);
         } else {
             send_output(self_);
         }
@@ -192,58 +255,6 @@ static void ready_input(ErlDrvData self_, ErlDrvEvent fd_)
     if (len < 0 && errno != EAGAIN) {
         driver_failure_posix(self->port, errno);
     }
-
-    // TODO(rattab): Should really return an errno to erlang.
-    assert(len >= 0 || errno == EAGAIN);
-}
-
-static void send_output(ErlDrvData self_)
-{
-    struct instance *self = (struct instance *)self_;
-
-    for(int i = 0; i < self->len; ++i) {
-        serialize_message(self, &(self->msgs[i]));
-    }
-
-    serialize_output(self);
-    int len = self->pos;
-
-    /* Reset to write over previous data */
-    reset_instance(self);
-
-    erl_drv_output_term(driver_mk_port(self->port),
-                        self->buf, len);
-}
-
-static void serialize_output(struct instance *self) {
-    self->buf[self->pos++] = ERL_DRV_NIL;
-    self->buf[self->pos++] = ERL_DRV_LIST;
-    self->buf[self->pos++] = self->len + 1;
-    self->buf[self->pos++] = ERL_DRV_TUPLE;
-    self->buf[self->pos++] = 2;
-}
-
-static void serialize_event(struct instance *self, const struct inotify_event *evt) {
-    struct message *msg = &(self->msgs[self->len++]);
-    msg->wd = evt->wd;
-    msg->len = strnlen(evt->name, NAME_MAX);
-    strncpy(msg->name, evt->name, (size_t)(msg->len));
-}
-
-static void serialize_message(struct instance *self, struct message *msg) {
-    self->buf[self->pos++] = ERL_DRV_INT;
-    self->buf[self->pos++] = msg->wd;
-    self->buf[self->pos++] = ERL_DRV_STRING;
-    self->buf[self->pos++] = (ErlDrvTermData) msg->name;
-    self->buf[self->pos++] = strlen(msg->name);
-    self->buf[self->pos++] = ERL_DRV_TUPLE;
-    self->buf[self->pos++] = 2;
-}
-
-static void reset_instance(struct instance *self) {
-    self->n_cooldowns = 0;
-    self->pos = 2;
-    self->len = 0;
 }
 
 static ErlDrvEntry driver_entry = {
