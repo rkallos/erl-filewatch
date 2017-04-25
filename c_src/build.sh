@@ -1,8 +1,4 @@
 #!/usr/bin/env sh
-#
-# Evaluate which function is fastest on this machine right now, and
-# build it into a shared object.  This is just a shell script rather
-# than a Makefile since there's not much point avoiding rebuilds here.
 
 set -eu
 
@@ -16,7 +12,7 @@ ERL_LIB_DIR=${ERL_LIB_DIR:-${ERL_ROOT}/usr/lib}
 ERTS_INCLUDE_DIR=${ERTS_INCLUDE_DIR:-${ERL_ROOT}/erts-$(erlang_eval 'erlang:system_info(version)')/include}
 
 CC=${CC:-cc}
-DEFAULT_CFLAGS="-O3 -march=native -mtune=native -ggdb -Wall -Wextra -Wno-missing-field-initializers"
+DEFAULT_CFLAGS="-O3 -march=native -mtune=native -ggdb -Wall -Wextra"
 CFLAGS="-fPIC -I${ERTS_INCLUDE_DIR} -I${ERL_INCLUDE_DIR} -std=gnu11 ${CFLAGS:-$DEFAULT_CFLAGS}"
 LDFLAGS="-L${ERL_LIB_DIR} -lei ${LDFLAGS:-}"
 

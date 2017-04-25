@@ -1,8 +1,5 @@
 Minimal file and directory watching in Erlang using inotify
 
-This is an application built around an Erlang port driver that interacts with
-inotify.
-
 ## Building
 
 ```
@@ -11,33 +8,22 @@ rebar3 compile
 
 ## Usage
 
-### `erl-filewatch:start(Self, Paths) -> {ok, Handle} | {error, _}`
+### `filewatch:start(Pid, Pairs = [{File, Term} ...]) -> {ok, Handle} | {error, _}`
+This is an application built around an Erlang port driver that interacts with
+inotify. You feed it a list of `{File, Term}` pairs, and when inotify detects
+events occurring at `File`, filewatch sends `Term` to `Pid`.
 
-Starts watching files/directories in `Paths`. Events that occur are batched until
-`CooldownMs` seconds have elapsed without events, or until 12 messages are
-collected.
-
-`Paths` is comprised of `{"path/to/file", Term}` or `{"path/to/dir/*", Term}`
-pairs. An inotify watch descriptor is opened on each unique directory in
-`Paths`, and a mapping of `{Descriptor, Filename}` to `Term` is created. When a
-particular watch is triggered, a `{Descriptor, Filename}` pair is sent from the
-port driver to Erlang, and is used as a key to find the correct `Term` to send
-to `Self`, if any.
-
-## FAQ
-
-### Why not open watch descriptors on individual files?
-
-The specific intended use case for this library is to trigger a response when a
-particular file is replaced. If an inotify watch descriptor is open on a file
-that gets replaced, no further events can be read from that descriptor. One
-option is to reopen a watch descriptor whenever a file is replaced, but watching
-directories and filtering in Erlang seems simpler.
+## How it works
+An inotify watch descriptor is opened for every unique directory in
+`Pairs`. When events for a particular watch descriptor are received from the
+Port Driver, they are filtered to only include the files specified in
+`Paths`. Watch descriptors are opened on directories rather than individual
+files to prevent having to reopen watch descriptors for files that get replaced.
 
 ## TODO
 
 - Add cooldown timeout in Erlang
 
-- Add tests
+- Add (more) tests
 
 - Add target for afl-fuzz
