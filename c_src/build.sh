@@ -18,13 +18,16 @@ LDFLAGS="-L${ERL_LIB_DIR} -lei ${LDFLAGS:-}"
 
 OS="$(uname -s)"
 
+SRC=./c_src
 case "$OS" in
     Linux)
         IMPLEMENTATION=filewatch_inotify
+        SRCFILES="$SRC/$IMPLEMENTATION.c $SRC/notif_set_tlh_htable.c $SRC/optics_htable/htable.c"
         ;;
     Darwin)
         LDFLAGS="$LDFLAGS -flat_namespace -undefined suppress"
         IMPLEMENTATION=filewatch_noop
+        SRCFILES="$SRC/$IMPLEMENTATION.c"
         ;;
     *)
         IMPLEMENTATION=filewatch_noop
@@ -36,7 +39,6 @@ if [ "$IMPLEMENTATION" = "filewatch_noop" ]; then
 fi
 
 TARGET=${TARGET:-./priv/filewatch.so}
-SRC=./c_src
 
 mkdir -p priv
 
@@ -50,4 +52,4 @@ up_to_date_p() {
 
 if (up_to_date_p); then exit 0; fi
 
-exec "$CC" $CFLAGS -shared -o "$TARGET" $SRC/$IMPLEMENTATION.c $LDFLAGS
+exec "$CC" $CFLAGS -shared -o "$TARGET" $SRCFILES $LDFLAGS
