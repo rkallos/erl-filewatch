@@ -90,12 +90,13 @@ create_watch_map([{Path, Term} | Rest], Port, Map) ->
 
 
 add_to_watch_map(Dir, File, Term, Port, Map) ->
-    {ok, WatchDescriptor} =
+    {WatchDescriptor, NewMap} =
         case maps:find(Dir, Map) of
-            error -> add_watch(Dir, Port);
-            Match -> Match
+            error -> {ok, WD} = add_watch(Dir, Port),
+                     {WD, maps:put(Dir, WD, Map)};
+            {ok, WD} -> {WD, Map}
         end,
-    maps:put({WatchDescriptor, File}, Term, Map).
+    maps:put({WatchDescriptor, File}, Term, NewMap).
 
 
 add_watch(Dir, Port) ->
@@ -106,7 +107,7 @@ add_watch(Dir, Port) ->
 watch(S = #state{port = Port}) ->
     receive
         {Port, Msgs} ->
-            handle_events(S, ordsets:from_list(Msgs)),
+            handle_events(S, Msgs),
             watch(S);
         terminate ->
             ok;

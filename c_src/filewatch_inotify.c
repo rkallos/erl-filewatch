@@ -12,33 +12,27 @@
 
 #include <ei.h>
 #include <erl_driver.h>
+#include "notif_set.h"
 
 enum {
-    MAX_EVENTS = 12,
     EVENT_TUPLE_LENGTH = 11,
     PORT_CALL_ARG = 1,
-    WATCH_FLAGS = IN_MOVED_TO | IN_CLOSE_WRITE,
+    WATCH_FLAGS = IN_MOVED_TO | IN_CLOSE_WRITE | IN_DELETE,
     BUFFER_TAIL_SIZE = 3,
     BUFFER_TUPLE_SIZE = 2
 };
 
 /*
   A struct inotify_event's relevant data is copied to an array of
-  struct message. This fixes a bug where messages sent back to Erlang
+  struct Message. This fixes a bug where messages sent back to Erlang
   had incorrect filenames.
 */
-struct message {
-    int wd;
-    size_t len;
-    char name[NAME_MAX];
-};
-
 struct instance {
     ErlDrvPort port;
     int fd;
-    size_t n_events;
     unsigned long cooldown_ms;
-    struct message msgs[MAX_EVENTS];
+    bool is_timer_set;
+    struct Notif_set *notif_set;
 };
 
 // argv = ["filewatch", CooldownMs]
@@ -70,9 +64,17 @@ static ErlDrvData start(ErlDrvPort port, char *command)
     *self = (struct instance){0};
     self->port = port;
     self->cooldown_ms = cooldown_ms;
+    self->is_timer_set = false;
+
+    self->notif_set = notif_set_new();
+    if(self->notif_set == NULL) {
+        driver_free(self);
+        return ERL_DRV_ERROR_GENERAL;
+    }
 
     self->fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (self->fd < 0) {
+        notif_set_destroy(self->notif_set);
         driver_free(self);
         return ERL_DRV_ERROR_ERRNO;
     }
@@ -85,6 +87,7 @@ static ErlDrvData start(ErlDrvPort port, char *command)
     );
     if (error) {
         close(self->fd);
+        notif_set_destroy(self->notif_set);
         driver_free(self);
         return ERL_DRV_ERROR_GENERAL;
     }
@@ -101,6 +104,7 @@ static void stop(ErlDrvData self_)
 {
     struct instance *self = (struct instance *)self_;
     driver_select(self->port, (ErlDrvEvent)(intptr_t)self->fd, ERL_DRV_USE, 0);
+    notif_set_destroy(self->notif_set);
     driver_free(self);
 }
 
@@ -181,41 +185,65 @@ static void send_output(ErlDrvData self_)
 {
     struct instance *self = (struct instance *)self_;
 
+    size_t len = notif_set_get_length(self->notif_set);
+
     size_t pos = 0;
-    ErlDrvTermData buf[(MAX_EVENTS * EVENT_TUPLE_LENGTH) + BUFFER_TAIL_SIZE];
+    ErlDrvTermData buf[(len * EVENT_TUPLE_LENGTH) + BUFFER_TAIL_SIZE];
 
     buf[pos++] = ERL_DRV_PORT;
     buf[pos++] = driver_mk_port(self->port);
 
-    struct message *msg;
-    for(uint i = 0; i < self->n_events; ++i) {
-        msg = &(self->msgs[i]);
+    struct Message msg[len];
+    for(size_t i = 0; i < len; i++) {
+        msg[i].name = driver_alloc(NAME_MAX);
+    }
+    int num_entries_removed = 0;
+    struct Notif_set_itr *itr = notif_set_itr_init(self->notif_set);
+    if(itr == NULL) {
+        stop(self_);
+    }
+    while(notif_set_itr_next(itr, &msg[num_entries_removed])) {
         buf[pos++] = ERL_DRV_INT;
-        buf[pos++] = msg->wd;
+        buf[pos++] = msg[num_entries_removed].wd;
         buf[pos++] = ERL_DRV_STRING;
-        buf[pos++] = (ErlDrvTermData) msg->name;
-        buf[pos++] = strnlen(msg->name, NAME_MAX);
+        buf[pos++] = (ErlDrvTermData) msg[num_entries_removed].name;
+        buf[pos++] = strnlen(msg[num_entries_removed].name, NAME_MAX);
         buf[pos++] = ERL_DRV_TUPLE;
         buf[pos++] = BUFFER_TUPLE_SIZE;
+
+        notif_set_itr_remove(itr);
+        num_entries_removed++;
     }
+    notif_set_itr_destroy(itr);
 
     /* Append values designating Erlang type */
     buf[pos++] = ERL_DRV_NIL;
     buf[pos++] = ERL_DRV_LIST;
-    buf[pos++] = self->n_events + 1; // +1 for nil
+    buf[pos++] = num_entries_removed + 1; // +1 for nil
     buf[pos++] = ERL_DRV_TUPLE;
     buf[pos++] = BUFFER_TUPLE_SIZE;
 
-    self->n_events = 0;
+    //Don't need to free any memory associated with notif_set
+    //entries; they are freed automatically as they get removed.
 
     erl_drv_output_term(driver_mk_port(self->port), buf, pos);
+
+    for(size_t i = 0; i < len; i++) {
+        driver_free(msg[i].name);
+    }
+
+    self->is_timer_set = false;
 }
 
 static void serialize_event(struct instance *self, const struct inotify_event *evt) {
-    struct message *msg = &(self->msgs[self->n_events++]);
-    msg->wd = evt->wd;
-    msg->len = strnlen(evt->name, NAME_MAX);
-    strncpy(msg->name, evt->name, NAME_MAX);
+    //Insert into notif_set to keep track of unique {wd, name} tuples.
+    int err_flag;
+    notif_set_insert(self->notif_set,
+                     &(struct Message) {.wd = evt->wd, .name = (char *) evt->name},
+                     &err_flag);
+    if(err_flag) {
+        stop((ErlDrvData) self);
+    }
 }
 
 #define aligned(x) __attribute((aligned(x)))
@@ -234,17 +262,13 @@ static void ready_input(ErlDrvData self_, ErlDrvEvent fd_)
 
         const char *ptr;
         for (ptr = buf; ptr < buf + len; ptr += sizeof(struct inotify_event) + event->len) {
-            if (self->n_events >= MAX_EVENTS) {
-                send_output(self_);
-            }
             event = (const struct inotify_event *)ptr;
             serialize_event(self, event);
         }
 
-        if (++self->n_events < MAX_EVENTS) {
+        if (!self->is_timer_set) {
+            self->is_timer_set = true;
             driver_set_timer(self->port, self->cooldown_ms);
-        } else {
-            send_output(self_);
         }
 
         // The kernel always checks if there is enough room in the buffer for
