@@ -12,7 +12,7 @@ ERL_LIB_DIR=${ERL_LIB_DIR:-${ERL_ROOT}/usr/lib}
 ERTS_INCLUDE_DIR=${ERTS_INCLUDE_DIR:-${ERL_ROOT}/erts-$(erlang_eval 'erlang:system_info(version)')/include}
 
 CC=${CC:-cc}
-DEFAULT_CFLAGS="-O3 -march=native -mtune=native -ggdb -Wall -Wextra"
+DEFAULT_CFLAGS="-O3 -ggdb -Wall -Wextra"
 CFLAGS="-fPIC -I${ERTS_INCLUDE_DIR} -I${ERL_INCLUDE_DIR} -std=gnu11 ${CFLAGS:-$DEFAULT_CFLAGS}"
 LDFLAGS="-L${ERL_LIB_DIR} -lei ${LDFLAGS:-}"
 
