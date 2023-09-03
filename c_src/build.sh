@@ -3,7 +3,7 @@
 set -eu
 
 erlang_eval() {
-    erl -noshell -s init stop -eval "io:format(\"~s\", [$1]), halt()."
+    erl -noshell -eval "io:format(\"~s\", [$1]), halt()." -s init stop
 }
 
 ERL_ROOT=${ERL_ROOT:-$(erlang_eval 'code:root_dir()')}
