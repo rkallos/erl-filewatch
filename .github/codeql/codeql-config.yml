@@ -1,0 +1,4 @@
+name: "Codeql config"
+
+queries:
+  - uses: security-and-quality
